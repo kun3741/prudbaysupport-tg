@@ -7,6 +7,7 @@ mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopol
 
 const MANAGER_CHAT_ID = process.env.MANAGER_CHAT_ID;
 
+
 const Counter = mongoose.model('Counter', new mongoose.Schema({
   name: { type: String, required: true, unique: true },
   value: { type: Number, default: 0 }
@@ -16,6 +17,7 @@ const User = mongoose.model('User', new mongoose.Schema({
   user_id: Number,
   username: String,
   name: String,
+  phone_number: String,
   tickets: [String]
 }));
 
@@ -40,6 +42,21 @@ async function generateTicketId() {
 
   const paddedNumber = counter.value.toString().padStart(4, '0');
   return `ticket-${paddedNumber}`;
+}
+
+function requestPhoneKeyboard() {
+  return {
+    keyboard: [
+      [
+        {
+          text: "📱 Надати номер телефону",
+          request_contact: true
+        }
+      ]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true
+  };
 }
 
 function mainMenuKeyboard() {
@@ -94,6 +111,7 @@ async function sendMainMenu(chatId, userName) {
   }
 }
 
+
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   const username = msg.chat.username || 'Без імені';
@@ -108,20 +126,50 @@ bot.onText(/\/start/, async (msg) => {
         resize_keyboard: true
       }
     });
-  } 
+  }
 
   let user = await User.findOne({ user_id: chatId });
 
   if (!user) {
-    user = new User({ user_id: chatId, username, name: '', tickets: [] });
-    bot.sendMessage(chatId, "Вітаю, я розумний бот prudbaydelivery🤖");
+    user = new User({ user_id: chatId, username, name: '', phone_number: '', tickets: [] });
     await user.save();
+  }
 
-    return bot.sendMessage(chatId, "Як до вас можна звертатися?✍️");
-  } else if (!user.name || user.name === '') {
-    return bot.sendMessage(chatId, "✍️Будь ласка, введіть Ваше ім'я:");
+  if (!user.phone_number) {
+    bot.sendMessage(chatId, "Вітаю, я розумний бот prudbaydelivery🤖");
+    return bot.sendMessage(chatId, "Надайте ваш номер телефону:", {
+      reply_markup: requestPhoneKeyboard()
+    });
+  }
+
+  if (!user.name || user.name === '') {
+    return bot.sendMessage(chatId, "✍️ Будь ласка, введіть Ваше ім'я:");
+  }
+
+  return sendMainMenu(chatId, user.name);
+});
+
+bot.on('contact', async (msg) => {
+  const chatId = msg.chat.id;
+  const contact = msg.contact;
+
+  if (contact && contact.phone_number) {
+    const user = await User.findOne({ user_id: chatId });
+
+    if (user) {
+      user.phone_number = contact.phone_number;
+      await user.save();
+
+      return bot.sendMessage(chatId, "Дякуємо! Тепер введіть Ваше ім'я:", {
+        reply_markup: {
+          remove_keyboard: true
+        }
+      });
+    } else {
+      return bot.sendMessage(chatId, "Помилка: користувача не знайдено.");
+    }
   } else {
-    return sendMainMenu(chatId, user.name);
+    return bot.sendMessage(chatId, "Будь ласка, надайте ваш номер телефону.");
   }
 });
 
@@ -148,17 +196,17 @@ bot.on('message', async (msg) => {
   const text = msg.text;
 
   if (text && text.startsWith('/')) return;
+  if (msg.contact) return;
 
   const user = await User.findOne({ user_id: chatId });
-  if (user && (!user.name || user.name === '') && !text.match(/^(🙇‍♂️ Зв'язок з менеджером|💚 Статус замовлення|⚡️ Швидкі відповіді)$/)) {
+
+  if (user && !user.name && user.phone_number) {
     user.name = text;
     await user.save();
 
-    bot.sendMessage(chatId, `Дякуємо, ${text}! Ваше ім'я збережено.`)
-    bot.sendMessage(chatId, `🏡 ГОЛОВНЕ МЕНЮ. \nВикористовуйте кнопки для навігації`, {
+    return bot.sendMessage(chatId, `Дякуємо, ${text}! Ваші дані збережено.`, {
       reply_markup: mainMenuKeyboard()
     });
-    return;
   }
 
   if (text === "🙇‍♂️ Зв'язок з менеджером") {
@@ -288,9 +336,10 @@ bot.on('message', async (msg) => {
       await bot.sendMessage(activeTicket.user_id, msg.text);
     } else if (msg.photo) {
       const fileId = msg.photo[msg.photo.length - 1].file_id;
+      const caption = msg.caption || '';
       activeTicket.messages.push({ from: 'manager', text: 'Фото' });
       await activeTicket.save();
-      await bot.sendPhoto(activeTicket.user_id, fileId);
+      await bot.sendPhoto(activeTicket.user_id, fileId, { caption });
     } else if (msg.document) {
       const fileId = msg.document.file_id;
       activeTicket.messages.push({ from: 'manager', text: 'Документ' });
@@ -329,9 +378,10 @@ bot.on('message', async (msg) => {
         await bot.sendMessage(MANAGER_CHAT_ID, `Від ${user.name} (@${msg.chat.username}, ID заявки: ${activeTicket.ticket_id}):\n${msg.text}`);
       } else if (msg.photo) {
         const fileId = msg.photo[msg.photo.length - 1].file_id;
+        const caption = msg.caption || '';
         activeTicket.messages.push({ from: 'user', text: 'Фото' });
         await activeTicket.save();
-        await bot.sendPhoto(MANAGER_CHAT_ID, fileId, { caption: `Від ${user.name} (@${msg.chat.username}, ID заявки: ${activeTicket.ticket_id})` });
+        await bot.sendPhoto(MANAGER_CHAT_ID, fileId, { caption: `Від ${user.name} (@${msg.chat.username}, ID заявки: ${activeTicket.ticket_id})\n${caption}` });
       } else if (msg.document) {
         const fileId = msg.document.file_id;
         activeTicket.messages.push({ from: 'user', text: 'Документ' });
@@ -368,9 +418,10 @@ bot.on('message', async (msg) => {
           bot.sendMessage(chatId, `Дякуємо, ${user.name}, очікуйте підключення менеджера 😉`);
         } else if (msg.photo) {
           const fileId = msg.photo[msg.photo.length - 1].file_id;
+          const caption = msg.caption || '';
           pendingTicket.messages.push({ from: 'user', text: 'Фото' });
           await pendingTicket.save();
-          await bot.sendPhoto(MANAGER_CHAT_ID, fileId, { caption: `Від ${user.name} (@${msg.chat.username}, ID заявки: ${pendingTicket.ticket_id})` });
+          await bot.sendPhoto(MANAGER_CHAT_ID, fileId, { caption: `Від ${user.name} (@${msg.chat.username}, ID заявки: ${pendingTicket.ticket_id})\n${caption}` });
         } else if (msg.document) {
           const fileId = msg.document.file_id;
           pendingTicket.messages.push({ from: 'user', text: 'Документ' });
@@ -401,7 +452,8 @@ bot.on('message', async (msg) => {
 });
 
 const TICKETS_PER_PAGE = 5;
-async function showTicketsHistory(chatId, type, messageId) {
+
+async function showTicketsHistory(chatId, type, page = 1, messageId = null) {
   let tickets = [];
   let ticketQuery = {};
 
@@ -416,18 +468,33 @@ async function showTicketsHistory(chatId, type, messageId) {
   tickets = await Ticket.find(ticketQuery).sort({ created_at: -1 });
 
   if (tickets.length === 0) {
-    return bot.editMessageText("Заявок цього типу не знайдено.", {
-      chat_id: chatId,
-      message_id: messageId,
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "Назад", callback_data: "back_to_ticket_options" }]
-        ]
-      }
-    });
+    const messageText = "Заявок цього типу не знайдено.";
+    const replyMarkup = {
+      inline_keyboard: [
+        [{ text: "Назад", callback_data: "back_to_ticket_options" }]
+      ]
+    };
+
+    if (messageId) {
+      await bot.editMessageText(messageText, {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: replyMarkup
+      });
+    } else {
+      await bot.sendMessage(chatId, messageText, {
+        reply_markup: replyMarkup
+      });
+    }
+    return;
   }
 
-  const formattedTickets = await Promise.all(tickets.map(async (ticket) => {
+  const totalPages = Math.ceil(tickets.length / TICKETS_PER_PAGE);
+  const startIndex = (page - 1) * TICKETS_PER_PAGE;
+  const endIndex = startIndex + TICKETS_PER_PAGE;
+  const ticketsToShow = tickets.slice(startIndex, endIndex);
+
+  const formattedTickets = await Promise.all(ticketsToShow.map(async (ticket) => {
     const user = await User.findOne({ user_id: ticket.user_id });
     const userName = user ? user.username || "Без імені користувача" : "Без імені користувача";
 
@@ -444,16 +511,34 @@ async function showTicketsHistory(chatId, type, messageId) {
     return [{ text: ticket.text, callback_data: ticket.callback_data }];
   });
 
-  await bot.editMessageText("Виберіть заявку для перегляду деталей:", {
-    chat_id: chatId,
-    message_id: messageId,
-    reply_markup: {
-      inline_keyboard: [
-        ...ticketButtons,
-        [{ text: "Назад", callback_data: "back_to_ticket_options" }]
-      ]
-    }
-  });
+  const navigationButtons = [];
+  if (page > 1) {
+    navigationButtons.push({ text: "⬅️ Назад", callback_data: `view_tickets_${type}_${page - 1}` });
+  }
+  if (page < totalPages) {
+    navigationButtons.push({ text: "➡️ Вперед", callback_data: `view_tickets_${type}_${page + 1}` });
+  }
+
+  const messageText = "Виберіть заявку для перегляду деталей:";
+  const replyMarkup = {
+    inline_keyboard: [
+      ...ticketButtons,
+      navigationButtons,
+      [{ text: "Назад", callback_data: "back_to_ticket_options" }]
+    ]
+  };
+
+  if (messageId) {
+    await bot.editMessageText(messageText, {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: replyMarkup
+    });
+  } else {
+    await bot.sendMessage(chatId, messageText, {
+      reply_markup: replyMarkup
+    });
+  }
 }
 
 bot.on('callback_query', async (query) => {
@@ -691,70 +776,10 @@ bot.on('callback_query', async (query) => {
   }
 
   if (data.startsWith("view_tickets_")) {
-    const type = data.split("_")[2]; 
-    let tickets = [];
-
-    if (type === "all") {
-      tickets = await Ticket.find({}).sort({ created_at: -1 });
-    } else if (type === "open") {
-      tickets = await Ticket.find({ status: 'open' }).sort({ created_at: -1 });
-    } else if (type === "closed") {
-      tickets = await Ticket.find({ status: 'closed' }).sort({ created_at: -1 });
-    }
-
-    if (tickets.length === 0) {
-      bot.answerCallbackQuery(query.id);
-      return bot.sendMessage(chatId, "Заявок цього типу не знайдено.");
-    }
-
-    const formattedTickets = await Promise.all(tickets.map(async (ticket) => {
-      const user = await User.findOne({ user_id: ticket.user_id });
-      const userName = user ? user.name || user.username || "Без імені користувача" : "Без імені користувача";
-      const userUsername = user ? user.username || "Без імені користувача" : "Без імені користувача";
-
-      const date = new Date(ticket.created_at);
-      const formattedDate = `${date.getDate()}.${date.getMonth() + 1}.${date.getFullYear()} ${date.getHours()}:${date.getMinutes().toString().padStart(2, '0')}`;
-
-      return {
-        text: `[${formattedDate}] ${ticket.ticket_id} @${userUsername}`,
-        callback_data: `details_${ticket.ticket_id}`
-      };
-    }));
-
-    // Створюємо кнопки для деталей заявок
-    const ticketButtons = formattedTickets.map(ticket => {
-      return [{ text: ticket.text, callback_data: ticket.callback_data }];
-    });
-
-    const messageChunks = [];
-    let currentChunk = `*Історія заявок* (${type === "all" ? "всі" : type === "open" ? "відкриті" : "закриті"}):\n\n`;
-
-    for (const ticketText of formattedTickets.map(ticket => ticket.text)) {
-      if (currentChunk.length + ticketText.length > 4000) {
-        messageChunks.push(currentChunk);
-        currentChunk = ticketText;
-      } else {
-        currentChunk += ticketText + "\n";
-      }
-    }
-
-    if (currentChunk) {
-      messageChunks.push(currentChunk);
-    }
-
-    for (const chunk of messageChunks) {
-      await bot.sendMessage(chatId, chunk, { parse_mode: "Markdown" });
-    }
-
-    await bot.sendMessage(chatId, "Виберіть заявку для перегляду деталей:", {
-      reply_markup: {
-        inline_keyboard: [
-          ...ticketButtons,
-          [{ text: "Назад", callback_data: "back_to_ticket_options" }]
-        ]
-      }
-    });
-
+    const parts = data.split("_");
+    const type = parts[2];
+    const page = parseInt(parts[3], 10);
+    await showTicketsHistory(chatId, type, page, messageId);
     bot.answerCallbackQuery(query.id);
     return;
   }
@@ -793,48 +818,16 @@ bot.on('callback_query', async (query) => {
       });
     }
 
-    if (message.length > 4000) {
-      const chunks = [];
-      let currentChunk = "";
-      const lines = message.split('\n');
-
-      for (const line of lines) {
-        if (currentChunk.length + line.length + 1 > 4000) {
-          chunks.push(currentChunk);
-          currentChunk = line + '\n';
-        } else {
-          currentChunk += line + '\n';
-        }
+    await bot.editMessageText(message, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "Назад до списку", callback_data: "back_to_ticket_list" }]
+        ]
       }
-
-      if (currentChunk) {
-        chunks.push(currentChunk);
-      }
-
-      for (let i = 0; i < chunks.length; i++) {
-        if (i === chunks.length - 1) {
-          await bot.sendMessage(chatId, chunks[i], {
-            parse_mode: "Markdown",
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: "Назад до списку", callback_data: "back_to_ticket_list" }]
-              ]
-            }
-          });
-        } else {
-          await bot.sendMessage(chatId, chunks[i], { parse_mode: "Markdown" });
-        }
-      }
-    } else {
-      await bot.sendMessage(chatId, message, {
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "Назад до списку", callback_data: "back_to_ticket_list" }]
-          ]
-        }
-      });
-    }
+    });
 
     bot.answerCallbackQuery(query.id);
     return;
@@ -858,16 +851,12 @@ bot.on('callback_query', async (query) => {
 
   if (data === "back_to_ticket_list") {
     const type = "all"; // або "open" або "closed" залежно від вашої логіки
-    await showTicketsHistory(chatId, type, messageId);
+    await showTicketsHistory(chatId, type, 1, messageId);
     bot.answerCallbackQuery(query.id);
     return;
   }
 });
 
-// Функція для показу історії заявок з пагінацією
-
-
-// Обробник для кнопки "current_page"
 bot.on('callback_query', async (query) => {
   if (query.data === "current_page") {
     bot.answerCallbackQuery(query.id, { text: "Ви вже на цій сторінці" });
@@ -882,5 +871,6 @@ async function initializeCounter() {
     console.log('Лічильник заявок ініціалізовано');
   }
 }
+
 
 initializeCounter().catch(err => console.error('Помилка ініціалізації лічильника:', err));
