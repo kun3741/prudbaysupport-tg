@@ -31,6 +31,16 @@ const Ticket = mongoose.model('Ticket', new mongoose.Schema({
   created_at: { type: Date, default: Date.now }
 }));
 
+const Order = mongoose.model('Order', new mongoose.Schema({
+  username: String,
+  fullName: String,
+  phoneNumber: String,
+  city: String,
+  npDepartment: String,
+  orderId: String,
+  createdAt: { type: Date, default: Date.now }
+}));
+
 async function generateTicketId() {
   let counter = await Counter.findOne({ name: 'ticketId' });
   if (!counter) {
@@ -120,6 +130,7 @@ bot.onText(/\/start/, async (msg) => {
     return bot.sendMessage(chatId, "Вітаємо, Менеджере! Виберіть опцію:", {
       reply_markup: {
         keyboard: [
+          ["Оформити замовлення", "Зміна статусу замовлення"],
           ["Показати активні заявки"],
           ["Історія заявок"]
         ],
@@ -191,6 +202,18 @@ bot.onText(/\/tickets/, async (msg) => {
   });
 });
 
+const orderSteps = [
+  { question: "Введіть @юзернейм клієнта: (без @)", field: "username" },
+  { question: "Введіть Прізвище, Ім'я, По-Батькові клієнта:", field: "fullName" },
+  { question: "Чи використовувати номер телефону з бази? (Так/Ні):", field: "phoneNumber" },
+  { question: "Введіть місто-отримувача:", field: "city" },
+  { question: "Введіть номер відділення Нової Пошти:", field: "npDepartment" },
+  { question: "Введіть ID замовлення:", field: "orderId" }
+];
+
+const orderData = {};
+const photoUploadState = {}; // Об'єкт для збереження стану завантаження фото
+
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
@@ -199,6 +222,82 @@ bot.on('message', async (msg) => {
   if (msg.contact) return;
 
   const user = await User.findOne({ user_id: chatId });
+
+  if (text && text.startsWith('/')) return;
+
+  // Початок оформлення замовлення
+  if (text === "Оформити замовлення" && chatId.toString() === MANAGER_CHAT_ID.toString()) {
+    orderData[chatId] = { step: 0, data: {} };
+    return bot.sendMessage(chatId, orderSteps[0].question);
+  }
+
+  // Обробка кроків оформлення замовлення
+  if (orderData[chatId]) {
+    const currentStep = orderData[chatId].step;
+    const currentField = orderSteps[currentStep].field;
+
+    if (currentField === "phoneNumber" && text.toLowerCase() === "так") {
+      const user = await User.findOne({ username: orderData[chatId].data.username });
+      if (user && user.phone_number) {
+        orderData[chatId].data.phoneNumber = user.phone_number;
+      } else {
+        return bot.sendMessage(chatId, "Номер телефону не знайдено в базі. Введіть новий номер:");
+      }
+    } else if (currentField === "phoneNumber") {
+      if (!text.match(/^\+380\d{9}$/)) {
+        return bot.sendMessage(chatId, "Номер телефону повинен починатися з +380 і містити 9 цифр. Спробуйте ще раз:");
+      }
+      orderData[chatId].data.phoneNumber = text;
+    } else {
+      orderData[chatId].data[currentField] = text;
+    }
+
+    orderData[chatId].step++;
+
+    if (orderData[chatId].step < orderSteps.length) {
+      return bot.sendMessage(chatId, orderSteps[orderData[chatId].step].question);
+    } else {
+      // Завершення оформлення замовлення
+      const order = new Order(orderData[chatId].data);
+      await order.save();
+
+      delete orderData[chatId];
+
+      bot.sendMessage(chatId, "Замовлення успішно оформлено!");
+
+      const user = await User.findOne({ username: order.username });
+      if (user) {
+        return bot.sendMessage(user.user_id, `Ваше замовлення успішно оформлено! ID замовлення: ${order.orderId}`);
+      } else {
+        return bot.sendMessage(chatId, "Клієнта не знайдено в базі. Повідомлення про замовлення не надіслано.");
+      }
+    }
+  }
+
+  if (photoUploadState[chatId]) return; // Ігноруємо, якщо менеджер завантажує фото
+
+  if (text.startsWith("Вартість доставки:")) {
+    const parts = text.split(":");
+    const cost = parts[1]?.trim();
+
+    if (!cost || isNaN(cost)) {
+      return bot.sendMessage(chatId, "Будь ласка, введіть коректну вартість доставки (число).");
+    }
+
+    const orderId = Object.keys(photoUploadState).find(key => photoUploadState[key].orderId);
+    const order = await Order.findOne({ orderId });
+
+    if (order) {
+      order.deliveryCost = cost;
+      await order.save();
+
+      bot.sendMessage(chatId, `Вартість доставки для замовлення ID: ${orderId} встановлено: ${cost} грн.`);
+      const user = await User.findOne({ username: order.username });
+      if (user) {
+        bot.sendMessage(user.user_id, `Ваше замовлення ID: ${orderId} оновлено. Вартість доставки: ${cost} грн.`);
+      }
+    }
+  }
 
   if (user && !user.name && user.phone_number) {
     user.name = text;
@@ -248,6 +347,24 @@ bot.on('message', async (msg) => {
       }
     });
     return;
+  }
+
+  if (text === "Зміна статусу замовлення" && chatId.toString() === MANAGER_CHAT_ID.toString()) {
+    const orders = await Order.find();
+
+    if (orders.length === 0) {
+      return bot.sendMessage(chatId, "Немає замовлень для зміни статусу.");
+    }
+
+    const inlineKeyboard = orders.map(order => {
+      return [{ text: `ID: ${order.orderId} @${order.username}`, callback_data: `change_status_${order.orderId}` }];
+    });
+
+    return bot.sendMessage(chatId, "Виберіть замовлення для зміни статусу:", {
+      reply_markup: {
+        inline_keyboard: inlineKeyboard
+      }
+    });
   }
 
   if (text === "⚡️ Швидкі відповіді") {
@@ -545,6 +662,168 @@ bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
   const data = query.data;
+
+  if (data.startsWith("change_status_")) {
+    const orderId = data.split("_")[2];
+    const order = await Order.findOne({ orderId });
+
+    if (!order) {
+      return bot.answerCallbackQuery(query.id, { text: "Замовлення не знайдено." });
+    }
+
+    return bot.editMessageText(`Виберіть новий статус для замовлення ID: ${orderId}`, {
+      chat_id: chatId,
+      message_id: query.message.message_id,
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "Замовлення прийнято та на етапі купівлі ✅", callback_data: `set_status_${orderId}_1` }],
+          [{ text: "Товар викуплено та відправлено на склад в Китаї ✅", callback_data: `set_status_${orderId}_2` }],
+          [{ text: "Товар прибув на склад та готується до перевірки ✅", callback_data: `set_status_${orderId}_3` }],
+          [{ text: "Надіслати фото-звіт", callback_data: `set_status_${orderId}_4_photo` }],
+          [{ text: "Посилка пройшла перевірку та комплектується ✅", callback_data: `set_status_${orderId}_4_pack` }],
+          [{ text: "Посилка успішно скомплектована та готується до відправки ✅", callback_data: `set_status_${orderId}_5` }],
+          [{ text: "Посилка прибула до України та готується до відправлення ✅", callback_data: `set_status_${orderId}_6` }]
+        ]
+      }
+    });
+  }
+
+  if (data.startsWith("set_status_")) {
+    const parts = data.split("_");
+    const orderId = parts[2];
+    const status = parts[3];
+    const action = parts[4]; // Наприклад, "photo" або "pack"
+
+    const order = await Order.findOne({ orderId });
+
+    if (!order) {
+      return bot.answerCallbackQuery(query.id, { text: "Замовлення не знайдено." });
+    }
+
+    let statusMessage = "";
+
+    switch (status) {
+      case "1":
+        statusMessage = "Замовлення прийнято та на етапі купівлі ✅";
+        break;
+      case "2":
+        statusMessage = "Товар викуплено та відправлено на склад в Китаї ✅";
+        break;
+      case "3":
+        statusMessage = "Товар прибув на склад та готується до перевірки ✅";
+        break;
+      case "4":
+        if (action === "photo") {
+          // Запит фото у менеджера
+          photoUploadState[chatId] = { orderId, photos: [] }; // Зберігаємо стан
+          return bot.editMessageText("Будь ласка, надішліть групу фото, які потрібно переслати клієнту. Коли завершите, натисніть кнопку 'Завершити завантаження'.", {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "Завершити завантаження", callback_data: `finish_photo_upload_${orderId}` }]
+              ]
+            }
+          });
+        } else if (action === "pack") {
+          statusMessage = "Посилка пройшла перевірку та комплектується.";
+        }
+        break;
+      case "5":
+        statusMessage = "Посилка успішно скомплектована та готується до відправки ✅";
+        // Запит вартості доставки
+        return bot.editMessageText("Введіть вартість доставки для цього замовлення:", {
+          chat_id: chatId,
+          message_id: query.message.message_id
+        });
+      case "6":
+        statusMessage = "Посилка прибула до України та готується до відправлення ✅";
+        break;
+      default:
+        return bot.answerCallbackQuery(query.id, { text: "Невідомий статус." });
+    }
+
+    if (statusMessage) {
+      order.status = statusMessage;
+      await order.save();
+
+      bot.answerCallbackQuery(query.id, { text: "Статус оновлено." });
+
+      bot.sendMessage(chatId, `Статус замовлення ID: ${orderId} оновлено на:\n${statusMessage}`);
+
+      // Надсилання статусу клієнту
+      const user = await User.findOne({ username: order.username });
+      if (user) {
+        bot.sendMessage(user.user_id, `Ваше замовлення ID: ${orderId} оновлено на:\n${statusMessage}`);
+      }
+    }
+  }
+
+  if (data.startsWith("finish_photo_upload_")) {
+    const orderId = data.split("_")[2];
+
+    // Перевірка стану завантаження фото
+    if (!photoUploadState[chatId] || photoUploadState[chatId].orderId !== orderId) {
+      return bot.answerCallbackQuery(query.id, { text: "Немає фото для завантаження." });
+    }
+
+    const photos = photoUploadState[chatId].photos;
+
+    if (photos.length === 0) {
+      return bot.answerCallbackQuery(query.id, { text: "Ви не завантажили жодного фото." });
+    }
+
+    // Надсилання фото клієнту
+    const order = await Order.findOne({ orderId });
+    const user = await User.findOne({ username: order.username });
+
+    if (user) {
+      await bot.sendMediaGroup(user.user_id, photos.map(photo => ({ type: "photo", media: photo })));
+      await bot.sendMessage(user.user_id, `Ваше замовлення ID: ${orderId} оновлено. Надіслано фото-звіт.`);
+    }
+
+    // Очищення стану
+    delete photoUploadState[chatId];
+
+    bot.answerCallbackQuery(query.id, { text: "Фото успішно надіслано клієнту." });
+    return bot.editMessageText(`Фото-звіт для замовлення ID: ${orderId} успішно надіслано клієнту.`, {
+      chat_id: chatId,
+      message_id: query.message.message_id
+    });
+  }
+
+  if (data.startsWith("finish_photo_upload_")) {
+    const orderId = data.split("_")[2];
+
+    // Перевірка стану завантаження фото
+    if (!photoUploadState[chatId] || photoUploadState[chatId].orderId !== orderId) {
+      return bot.answerCallbackQuery(query.id, { text: "Немає фото для завантаження." });
+    }
+
+    const photos = photoUploadState[chatId].photos;
+
+    if (photos.length === 0) {
+      return bot.answerCallbackQuery(query.id, { text: "Ви не завантажили жодного фото." });
+    }
+
+    // Надсилання фото клієнту
+    const order = await Order.findOne({ orderId });
+    const user = await User.findOne({ username: order.username });
+
+    if (user) {
+      await bot.sendMediaGroup(user.user_id, photos.map(photo => ({ type: "photo", media: photo })));
+      await bot.sendMessage(user.user_id, `Ваше замовлення ID: ${orderId} оновлено. Надіслано фото-звіт.`);
+    }
+
+    // Очищення стану
+    delete photoUploadState[chatId];
+
+    bot.answerCallbackQuery(query.id, { text: "Фото успішно надіслано клієнту." });
+    return bot.editMessageText(`Фото-звіт для замовлення ID: ${orderId} успішно надіслано клієнту.`, {
+      chat_id: chatId,
+      message_id: query.message.message_id
+    });
+  }
 
   if (data.startsWith("quick_reply_")) {
     switch (data) {
@@ -854,6 +1133,20 @@ bot.on('callback_query', async (query) => {
     await showTicketsHistory(chatId, type, 1, messageId);
     bot.answerCallbackQuery(query.id);
     return;
+  }
+});
+
+
+
+bot.on('photo', async (msg) => {
+  const chatId = msg.chat.id;
+
+  // Перевірка, чи менеджер у стані завантаження фото
+  if (photoUploadState[chatId]) {
+    const fileId = msg.photo[msg.photo.length - 1].file_id; // Беремо останнє (найбільше) фото
+    photoUploadState[chatId].photos.push(fileId); // Додаємо фото до стану
+
+    return bot.sendMessage(chatId, "Фото додано. Надішліть ще фото або натисніть 'Завершити завантаження'.");
   }
 });
 
