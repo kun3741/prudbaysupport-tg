@@ -1,5 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const mongoose = require('mongoose');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const startCommand = require('./commands/start');
@@ -11,6 +13,7 @@ const callbackQueryHandler = require('./handlers/callbackQueries');
 
 const bot = new TelegramBot(process.env.TOKEN, { polling: true });
 mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+
 
 const orderData = {};
 const photoUploadState = {};

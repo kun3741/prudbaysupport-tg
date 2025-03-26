@@ -19,18 +19,19 @@ async function generateTicketId() {
 
 async function messagesHandler(bot, msg, orderData, photoUploadState) {
   const chatId = msg.chat.id;
-  const text = msg.text || ''; 
+  const text = msg.text || '';
 
-  if (text && text.startsWith('/')) return;
+  // Ignore button presses (callback queries are handled separately)
+  if (msg.reply_markup || msg.entities?.some(entity => entity.type === 'bot_command')) {
+    return;
+  }
 
   const user = await User.findOne({ user_id: chatId });
-
 
   if (text === "Оформити замовлення" && chatId.toString() === process.env.MANAGER_CHAT_ID) {
     orderData[chatId] = { step: 0, data: {} };
     return bot.sendMessage(chatId, "Введіть @юзернейм клієнта: (без @)");
   }
-
 
   if (orderData[chatId]) {
     const currentStep = orderData[chatId].step;
@@ -86,28 +87,6 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
 
   if (photoUploadState[chatId]) return;
 
-  if (text.startsWith("Вартість доставки:")) {
-    const parts = text.split(":");
-    const cost = parts[1]?.trim();
-
-    if (!cost || isNaN(cost)) {
-      return bot.sendMessage(chatId, "Будь ласка, введіть коректну вартість доставки (число).");
-    }
-
-    const orderId = Object.keys(photoUploadState).find(key => photoUploadState[key].orderId);
-    const order = await Order.findOne({ orderId });
-
-    if (order) {
-      order.deliveryCost = cost;
-      await order.save();
-
-      bot.sendMessage(chatId, `Вартість доставки для замовлення ID: ${orderId} встановлено: ${cost} грн.`);
-      const user = await User.findOne({ username: order.username });
-      if (user) {
-        bot.sendMessage(user.user_id, `Ваше замовлення ID: ${orderId} оновлено. Вартість доставки: ${cost} грн.`);
-      }
-    }
-  }
 
   if (user && !user.name && user.phone_number) {
     user.name = text;
@@ -125,8 +104,8 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
       return bot.sendMessage(chatId, "У вас вже є активна або не прийнята заявка. Будь ласка, дочекайтеся відповіді менеджера.");
     }
 
-    const ticketId = await generateTicketId();  
-    
+    const ticketId = await generateTicketId();
+
     const ticket = new Ticket({
       ticket_id: ticketId,
       user_id: chatId,
@@ -243,8 +222,8 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
   if (chatId.toString() === process.env.MANAGER_CHAT_ID) {
     console.log("Менеджер надіслав повідомлення:", text);
 
-    const activeTicket = await Ticket.findOne({ 
-      status: 'open', 
+    const activeTicket = await Ticket.findOne({
+      status: 'open',
       accepted: true,
       activeManagerConversation: true
     });
@@ -292,10 +271,10 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
   } else {
     console.log(`Користувач надіслав повідомлення:`, text);
 
-    const activeTicket = await Ticket.findOne({ 
-      user_id: chatId, 
+    const activeTicket = await Ticket.findOne({
+      user_id: chatId,
       status: 'open',
-      accepted: true 
+      accepted: true
     });
 
     if (activeTicket) {
