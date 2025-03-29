@@ -2,6 +2,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
+const express = require('express'); // Added Express
 require('dotenv').config();
 
 const User = require('./models/User');
@@ -17,6 +18,17 @@ mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopol
 
 const orderData = {};
 const photoUploadState = {}; 
+
+// СЕРВЕР ДЛЯ БОТА // СЕРВЕР ДЛЯ БОТА // СЕРВЕР ДЛЯ БОТА
+const app = express(); 
+const PORT = process.env.PORT || 3000;
+
+app.use(express.static(path.join(__dirname, 'frontend')));
+
+app.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
+});
+// СЕРВЕР ДЛЯ БОТА // СЕРВЕР ДЛЯ БОТА // СЕРВЕР ДЛЯ БОТА
 
 bot.onText(/\/start/, (msg) => startCommand(bot, msg));
 bot.on('contact', async (msg) => {
