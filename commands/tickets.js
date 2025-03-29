@@ -3,7 +3,6 @@ const User = require('../models/User');
 const { mainMenuKeyboard } = require('../utils/keyboards');
 const Counter = require('../models/Counter');
 
-// Generate a unique ticket ID
 async function generateTicketId() {
   let counter = await Counter.findOne({ name: 'ticketId' });
   if (!counter) {
@@ -17,18 +16,15 @@ async function generateTicketId() {
   return `ticket-${paddedNumber}`;
 }
 
-// Handle the /tickets command
 async function ticketsCommand(bot, msg) {
   const chatId = msg.chat.id;
 
-  // Fetch all tickets for the user
   const tickets = await Ticket.find({ user_id: chatId });
 
   if (tickets.length === 0) {
     return bot.sendMessage(chatId, "У вас немає заявок.");
   }
 
-  // Generate a list of tickets
   const ticketList = tickets.map(ticket => {
     const status = ticket.status === 'open' ? '🟢 Відкрита' : '🔴 Закрита';
     return `🎫 Заявка ID: ${ticket.ticket_id}\nСтатус: ${status}`;
@@ -43,7 +39,6 @@ async function ticketsCommand(bot, msg) {
   });
 }
 
-// Handle ticket creation
 async function createTicket(bot, chatId, user) {
   const existingTicket = await Ticket.findOne({ user_id: chatId, status: 'open' });
 
@@ -84,7 +79,6 @@ async function createTicket(bot, chatId, user) {
   });
 }
 
-// Handle ticket details
 async function showTicketDetails(bot, chatId, ticketId, messageId) {
   const ticket = await Ticket.findOne({ ticket_id: ticketId });
 
@@ -129,51 +123,13 @@ async function showTicketDetails(bot, chatId, ticketId, messageId) {
   });
 }
 
-// Handle ticket history viewing
-// async function showTicketsHistory(bot, chatId, type, page, messageId) {
-//   const limit = 5; // Number of tickets per page
-//   const skip = (page - 1) * limit;
 
-//   let query = {};
-//   if (type === 'open') {
-//     query.status = 'open';
-//   } else if (type === 'closed') {
-//     query.status = 'closed';
-//   }
 
-//   const tickets = await Ticket.find(query).skip(skip).limit(limit);
-//   const totalTickets = await Ticket.countDocuments(query);
 
-//   if (tickets.length === 0) {
-//     return bot.editMessageText("Немає заявок для відображення.", {
-//       chat_id: chatId,
-//       message_id: messageId
-//     });
-//   }
 
-//   const ticketList = tickets.map(ticket => {
-//     const status = ticket.status === 'open' ? '🟢 Відкрита' : '🔴 Закрита';
-//     return `🎫 Заявка ID: ${ticket.ticket_id}\nСтатус: ${status}`;
-//   }).join('\n\n');
 
-//   const totalPages = Math.ceil(totalTickets / limit);
 
-//   const inlineKeyboard = [];
-//   if (page > 1) {
-//     inlineKeyboard.push([{ text: "⬅️ Попередня", callback_data: `view_tickets_${type}_${page - 1}` }]);
-//   }
-//   if (page < totalPages) {
-//     inlineKeyboard.push([{ text: "➡️ Наступна", callback_data: `view_tickets_${type}_${page + 1}` }]);
-//   }
 
-//   bot.editMessageText(`Ваші заявки:\n\n${ticketList}`, {
-//     chat_id: chatId,
-//     message_id: messageId,
-//     reply_markup: {
-//       inline_keyboard: inlineKeyboard
-//     }
-//   });
-// }
 
 const TICKETS_PER_PAGE = 5;
 async function showTicketsHistory(bot, chatId, type, page = 1, messageId = null) {
@@ -264,7 +220,6 @@ async function showTicketsHistory(bot, chatId, type, page = 1, messageId = null)
   }
 }
 
-// Handle ticket chat history viewing
 async function showTicketChat(bot, chatId, ticketId, messageId) {
   const ticket = await Ticket.findOne({ ticket_id: ticketId });
 
@@ -312,9 +267,8 @@ async function showTicketChat(bot, chatId, ticketId, messageId) {
   });
 }
 
-// Handle ticket list with buttons for chat history
 async function showTicketsWithChat(bot, chatId, type, page, messageId) {
-  const limit = 5; // Number of tickets per page
+  const limit = 5;
   const skip = (page - 1) * limit;
 
   let query = {};

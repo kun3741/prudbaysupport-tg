@@ -5,8 +5,10 @@ const orderSchema = new mongoose.Schema({
   fullName: String,
   phoneNumber: String,
   city: String,
-  npDepartment: String,
+  novaPost: String,
   orderId: String,
+  deliveryPrice: Number, // New field for delivery cost
+  status: { type: String, default: "Замовлення створено" }, // New field for order status
   createdAt: { type: Date, default: Date.now }
 });
 

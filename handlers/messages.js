@@ -1,4 +1,4 @@
-const { mainMenuKeyboard, quickRepliesKeyboard } = require('../utils/keyboards');
+const { mainMenuKeyboard, quickRepliesKeyboard, stagesKeyboard } = require('../utils/keyboards');
 const User = require('../models/User');
 const Ticket = require('../models/Ticket');
 const Order = require('../models/Order');
@@ -21,16 +21,44 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
   const chatId = msg.chat.id;
   const text = msg.text || '';
 
-  // Ignore button presses (callback queries are handled separately)
-  if (msg.reply_markup || msg.entities?.some(entity => entity.type === 'bot_command')) {
-    return;
-  }
+  if (photoUploadState[chatId] && photoUploadState[chatId].awaitingPrice) {
+    const orderId = photoUploadState[chatId].orderId;
 
-  const user = await User.findOne({ user_id: chatId });
+    if (isNaN(text)) {
+      return bot.sendMessage(chatId, "Будь ласка, введіть коректну вартість доставки (число).");
+    }
+
+    const price = parseFloat(text);
+    const order = await Order.findOne({ orderId });
+
+    if (!order) {
+      delete photoUploadState[chatId];
+      return bot.sendMessage(chatId, "Замовлення не знайдено.");
+    }
+
+    order.deliveryPrice = price;
+    order.status = "Посилка успішно скомплектована та готується до відправки ✅";
+    await order.save();
+
+    delete photoUploadState[chatId];
+
+    const user = await User.findOne({ username: order.username });
+    if (user) {
+      await bot.sendMessage(user.user_id, `Ваше замовлення ID: ${orderId} успішно скомплектовано.\nВартість доставки: ${price} грн.\nБудь ласка, зв'яжіться з менеджером, для уточнення реквізитів. Використовуйте '🙇‍♂️ Зв'язок з менеджером'.`);
+    }
+
+    return bot.sendMessage(chatId, `Вартість доставки для замовлення ID: ${orderId} встановлено: ${price} грн. Повідомлення клієнту надіслано.`);
+  }
 
   if (text === "Оформити замовлення" && chatId.toString() === process.env.MANAGER_CHAT_ID) {
     orderData[chatId] = { step: 0, data: {} };
-    return bot.sendMessage(chatId, "Введіть @юзернейм клієнта: (без @)");
+    return bot.sendMessage(chatId, "Введіть @юзернейм клієнта: (без @)", {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "Відмінити оформлення", callback_data: "cancel_order" }]
+        ]
+      }
+    });
   }
 
   if (orderData[chatId]) {
@@ -44,6 +72,11 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
       "Введіть номер відділення Нової Пошти:",
       "Введіть ID замовлення:"
     ];
+
+    if (text === "Відмінити оформлення") {
+      delete orderData[chatId];
+      return bot.sendMessage(chatId, "Оформлення замовлення скасовано.");
+    }
 
     if (currentStep < fields.length) {
       const field = fields[currentStep];
@@ -66,7 +99,13 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
       orderData[chatId].step++;
 
       if (orderData[chatId].step < fields.length) {
-        return bot.sendMessage(chatId, questions[orderData[chatId].step]);
+        return bot.sendMessage(chatId, questions[orderData[chatId].step], {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Відмінити оформлення", callback_data: "cancel_order" }]
+            ]
+          }
+        });
       } else {
         const order = new Order(orderData[chatId].data);
         await order.save();
@@ -85,8 +124,13 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
     }
   }
 
-  if (photoUploadState[chatId]) return;
+  if (msg.reply_markup || msg.entities?.some(entity => entity.type === 'bot_command')) {
+    return;
+  }
 
+  const user = await User.findOne({ user_id: chatId });
+
+  if (photoUploadState[chatId]) return;
 
   if (user && !user.name && user.phone_number) {
     user.name = text;
@@ -164,7 +208,68 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
   }
 
   if (text === "💚 Статус замовлення") {
-    bot.sendMessage(chatId, "потім");
+    const user = await User.findOne({ user_id: chatId });
+
+    if (!user) {
+      bot.sendMessage(chatId, "Користувача не знайдено. Зверніться до менеджера.");
+      return;
+    }
+
+    const orders = await Order.find({ username: user.username }).sort({ createdAt: -1 });
+
+    if (!orders || orders.length === 0) {
+      bot.sendMessage(chatId, "Замовлень ще немає, зверніться до менеджера для його створення.");
+      return;
+    }
+
+    const latestOrder = orders[0];
+    const status = latestOrder.status || "Замовлення створено";
+    const orderId = latestOrder.orderId || "Невідомий";
+
+    let responseText = `Ваше замовлення ID: ${orderId}\nСтатус: ${status}`;
+
+    let inlineKeyboard = [];
+    switch (status) {
+      case "Замовлення прийнято та на етапі купівлі ✅":
+        inlineKeyboard = [
+          [{ text: "Коли я можу дізнатися новий статус?", callback_data: "status_question_1" }]
+        ];
+        break;
+      case "Товар викуплено та відправлено на склад в Китаї ✅":
+        inlineKeyboard = [
+          [{ text: "Коли товар прибуде на склад?", callback_data: "status_question_2" }]
+        ];
+        break;
+      case "Товар прибув на склад та готується до перевірки ✅":
+        inlineKeyboard = [
+          [{ text: "Коли я можу отримати фото-звіт?", callback_data: "status_question_3" }]
+        ];
+        break;
+      case "Посилка успішно скомплектована та готується до відправки ✅":
+        responseText += `\nВартість доставки: ${latestOrder.deliveryPrice || "Невідомо"} грн.`;
+        inlineKeyboard = [
+          [{ text: "Скільки часу у мене є на оплату доставки?", callback_data: "status_question_5" }]
+        ];
+        break;
+      case "Посилка прибула до України та готується до відправлення ✅":
+        inlineKeyboard = [
+          [{ text: "Коли я можу очікувати відправлення?", callback_data: "status_question_6" }]
+        ];
+        break;
+    }
+
+    bot.sendMessage(chatId, responseText, {
+      reply_markup: {
+        inline_keyboard: inlineKeyboard
+      }
+    });
+    return;
+  }
+
+  if (text === "🚀 Стадії замовлення") {
+    bot.sendMessage(chatId, "Виберіть стадію замовлення:", {
+      reply_markup: stagesKeyboard()
+    });
     return;
   }
 
@@ -350,10 +455,40 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
           await pendingTicket.save();
           await bot.forwardMessage(process.env.MANAGER_CHAT_ID, forwardFromChatId, messageId);
         }
-      } else {
-        bot.sendMessage(chatId, "У вас немає активних заявок. Виберіть '🙇‍♂️ Зв'язок з менеджером', щоб створити нову заявку.");
       }
     }
+  }
+
+  if (text === "📤 Надіслати всі фото") {
+    if (!photoUploadState[chatId] || !photoUploadState[chatId].photos || photoUploadState[chatId].photos.length === 0) {
+      return bot.sendMessage(chatId, "Немає фото для надсилання.");
+    }
+
+    const session = photoUploadState[chatId];
+    if (!session.clientId) {
+      return bot.sendMessage(chatId, "ID клієнта не знайдено. Перевірте дані та спробуйте ще раз.");
+    }
+
+    try {
+      for (const fileId of session.photos) {
+        await bot.sendPhoto(session.clientId, fileId, { caption: "Ваше замовлення готове ✅" });
+      }
+
+      await bot.sendMessage(session.clientId, "Будь ласка, підтвердіть, що все підходить.\nЯкщо є питання - використовуйте '🙇‍♂️ Зв'язок з менеджером'.", {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Все підходить ✅", callback_data: `confirm_photos_${session.clientId}` }]
+          ]
+        }
+      });
+
+      bot.sendMessage(chatId, "Фотозвіт успішно надіслано клієнту ✅");
+      delete photoUploadState[chatId];
+    } catch (error) {
+      console.error("Помилка при надсиланні фото клієнту:", error);
+      bot.sendMessage(chatId, "Не вдалося надіслати фото клієнту.");
+    }
+    return;
   }
 }
 

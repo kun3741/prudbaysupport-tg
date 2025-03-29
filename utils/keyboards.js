@@ -38,8 +38,42 @@ function requestPhoneKeyboard() {
     };
   }
   
+  function stagesKeyboard() {
+    return {
+      inline_keyboard: [
+        [
+          { text: "Коли я можу дізнатися новий статус?", callback_data: "stage_status_1" }
+        ],
+        [
+          { text: "Коли товар прибуде на склад?", callback_data: "stage_status_2" }
+        ],
+        [
+          { text: "Коли я можу отримати фото-звіт?", callback_data: "stage_status_3" }
+        ],
+        [
+          { text: "Скільки часу на оплату доставки?", callback_data: "stage_status_5" }
+        ],
+        [
+          { text: "Коли я можу очікувати відправлення?", callback_data: "stage_status_6" }
+        ]
+      ]
+    };
+  }
+  
+  function backButtonKeyboard() {
+    return {
+      inline_keyboard: [
+        [
+          { text: "◀️ Назад", callback_data: "stage_back" }
+        ]
+      ]
+    };
+  }
+  
   module.exports = {
     requestPhoneKeyboard,
     mainMenuKeyboard,
-    quickRepliesKeyboard
+    quickRepliesKeyboard,
+    stagesKeyboard,
+    backButtonKeyboard
   };
