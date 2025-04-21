@@ -3,6 +3,8 @@ const User = require('../models/User');
 const Ticket = require('../models/Ticket');
 const Order = require('../models/Order');
 const Counter = require('../models/Counter');
+const { showManagerOrdersList } = require('../commands/start');
+const { addOrderToAirtable, updateOrderInAirtable } = require('../utils/airtable');
 
 async function generateTicketId() {
   let counter = await Counter.findOne({ name: 'ticketId' });
@@ -20,8 +22,15 @@ async function generateTicketId() {
 async function messagesHandler(bot, msg, orderData, photoUploadState) {
   const chatId = msg.chat.id;
   const text = msg.text || '';
+  const userId = msg.from.id;
 
-  if (photoUploadState[chatId] && photoUploadState[chatId].awaitingPrice) {
+  if (text.startsWith('/') || (msg.entities && msg.entities.some(e => e.type === 'bot_command'))) {
+      return;
+  }
+
+  const isManager = userId.toString() === process.env.MANAGER_CHAT_ID;
+
+  if (isManager && photoUploadState[chatId] && photoUploadState[chatId].awaitingPrice) {
     const orderId = photoUploadState[chatId].orderId;
 
     if (isNaN(text)) {
@@ -50,9 +59,19 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
     return bot.sendMessage(chatId, `Вартість доставки для замовлення ID: ${orderId} встановлено: ${price} грн. Повідомлення клієнту надіслано.`);
   }
 
-  if (text === "Оформити замовлення" && chatId.toString() === process.env.MANAGER_CHAT_ID) {
+  if (text === "Оформити замовлення" && isManager) {
     orderData[chatId] = { step: 0, data: {} };
-    return bot.sendMessage(chatId, "Введіть @юзернейм клієнта: (без @)", {
+    const fields = ["username", "fullName", "phoneNumber", "productName", "city", "novaPost", "orderId"];
+    const questions = [
+      "Введіть @юзернейм клієнта: (без @)",
+      "Введіть Прізвище, Ім'я, По-Батькові клієнта:",
+      "Введіть номер телефону клієнта (формат +380xxxxxxxxx) або 'Так', щоб використати номер з бази:",
+      "Введіть назву товару:",
+      "Введіть місто-отримувача:",
+      "Введіть номер відділення Нової Пошти:",
+      "Введіть ID замовлення:"
+    ];
+    return bot.sendMessage(chatId, questions[0], {
       reply_markup: {
         inline_keyboard: [
           [{ text: "Відмінити оформлення", callback_data: "cancel_order" }]
@@ -61,13 +80,14 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
     });
   }
 
-  if (orderData[chatId]) {
+  if (orderData[chatId] && isManager) {
     const currentStep = orderData[chatId].step;
-    const fields = ["username", "fullName", "phoneNumber", "city", "npDepartment", "orderId"];
+    const fields = ["username", "fullName", "phoneNumber", "productName", "city", "novaPost", "orderId"];
     const questions = [
       "Введіть @юзернейм клієнта: (без @)",
       "Введіть Прізвище, Ім'я, По-Батькові клієнта:",
-      "Чи використовувати номер телефону з бази? (Так/Ні):",
+      "Введіть номер телефону клієнта (формат +380xxxxxxxxx) або 'Так', щоб використати номер з бази:",
+      "Введіть назву товару:",
       "Введіть місто-отримувача:",
       "Введіть номер відділення Нової Пошти:",
       "Введіть ID замовлення:"
@@ -80,18 +100,27 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
 
     if (currentStep < fields.length) {
       const field = fields[currentStep];
-      if (field === "phoneNumber" && text.toLowerCase() === "так") {
-        const user = await User.findOne({ username: orderData[chatId].data.username });
-        if (user && user.phone_number) {
-          orderData[chatId].data.phoneNumber = user.phone_number;
+
+      if (field === "phoneNumber") {
+        if (text.toLowerCase() === "так") {
+          const clientUsername = orderData[chatId].data.username;
+          if (!clientUsername) {
+             delete orderData[chatId];
+             return bot.sendMessage(chatId, "Помилка: юзернейм клієнта не вказано на попередньому кроці. Оформлення скасовано.");
+          }
+          const clientUser = await User.findOne({ username: clientUsername });
+          if (clientUser && clientUser.phone_number) {
+            orderData[chatId].data.phoneNumber = clientUser.phone_number;
+          } else {
+             orderData[chatId].step--;
+            return bot.sendMessage(chatId, "Номер телефону не знайдено в базі або ви не ввели 'Так'. Введіть номер телефону (формат +380xxxxxxxxx):");
+          }
         } else {
-          return bot.sendMessage(chatId, "Номер телефону не знайдено в базі. Введіть новий номер:");
+           if (!text.match(/^\+380\d{9}$/)) {
+             return bot.sendMessage(chatId, "Невірний формат номеру. Номер телефону повинен починатися з +380 і містити 9 цифр після. Спробуйте ще раз:");
+           }
+           orderData[chatId].data.phoneNumber = text;
         }
-      } else if (field === "phoneNumber") {
-        if (!text.match(/^\+380\d{9}$/)) {
-          return bot.sendMessage(chatId, "Номер телефону повинен починатися з +380 і містити 9 цифр. Спробуйте ще раз:");
-        }
-        orderData[chatId].data.phoneNumber = text;
       } else {
         orderData[chatId].data[field] = text;
       }
@@ -99,7 +128,8 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
       orderData[chatId].step++;
 
       if (orderData[chatId].step < fields.length) {
-        return bot.sendMessage(chatId, questions[orderData[chatId].step], {
+        let nextQuestion = questions[orderData[chatId].step];
+        return bot.sendMessage(chatId, nextQuestion, {
           reply_markup: {
             inline_keyboard: [
               [{ text: "Відмінити оформлення", callback_data: "cancel_order" }]
@@ -107,386 +137,377 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
           }
         });
       } else {
-        const order = new Order(orderData[chatId].data);
-        await order.save();
+        const orderDetails = { ...orderData[chatId].data };
+        if (orderDetails.npDepartment) {
+            orderDetails.novaPost = orderDetails.npDepartment;
+            delete orderDetails.npDepartment;
+        }
+
+        const newOrder = new Order(orderDetails);
+        await newOrder.save();
+        addOrderToAirtable(newOrder)
+
+        const savedOrderId = newOrder.orderId;
+        const clientUsername = newOrder.username;
 
         delete orderData[chatId];
 
-        bot.sendMessage(chatId, "Замовлення успішно оформлено!");
+        bot.sendMessage(chatId, `Замовлення ID: ${savedOrderId} успішно оформлено!`);
 
-        const user = await User.findOne({ username: order.username });
-        if (user) {
-          return bot.sendMessage(user.user_id, `Ваше замовлення успішно оформлено! ID замовлення: ${order.orderId}`);
+        const clientUser = await User.findOne({ username: clientUsername });
+        if (clientUser) {
+          return bot.sendMessage(clientUser.user_id, `Ваше замовлення успішно оформлено! ID замовлення: ${savedOrderId}`);
         } else {
-          return bot.sendMessage(chatId, "Клієнта не знайдено в базі. Повідомлення про замовлення не надіслано.");
+          return bot.sendMessage(chatId, `Клієнта @${clientUsername} не знайдено в базі. Повідомлення про замовлення не надіслано.`);
         }
       }
     }
-  }
-
-  if (msg.reply_markup || msg.entities?.some(entity => entity.type === 'bot_command')) {
     return;
   }
 
-  const user = await User.findOne({ user_id: chatId });
 
-  if (photoUploadState[chatId]) return;
+  if (photoUploadState[chatId] && text !== "📤 Надіслати всі фото") return;
 
-  if (user && !user.name && user.phone_number) {
-    user.name = text;
-    await user.save();
-
-    return bot.sendMessage(chatId, `Дякуємо, ${text}! Ваші дані збережено.`, {
-      reply_markup: mainMenuKeyboard()
-    });
-  }
-
-  if (text === "🙇‍♂️ Зв'язок з менеджером") {
-    const existingTicket = await Ticket.findOne({ user_id: chatId, status: 'open' });
-
-    if (existingTicket) {
-      return bot.sendMessage(chatId, "У вас вже є активна або не прийнята заявка. Будь ласка, дочекайтеся відповіді менеджера.");
-    }
-
-    const ticketId = await generateTicketId();
-
-    const ticket = new Ticket({
-      ticket_id: ticketId,
-      user_id: chatId,
-      status: 'open',
-      accepted: false,
-      activeManagerConversation: false,
-      messages: []
-    });
-    await ticket.save();
-
-    await User.findOneAndUpdate({ user_id: chatId }, { $push: { tickets: ticketId } });
-
-    const kyivDate = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Kiev' }));
-    const currentHour = kyivDate.getHours();
-    if (currentHour >= 21 || currentHour < 9) {
-      bot.sendMessage(chatId, `Наші менеджери після 21:00 відпочивають🥱 Зачекайте будь ласка до 9:00.`);
-      bot.sendMessage(chatId, `✍️ Напишіть, будь ласка, питання і очікуйте підключення менеджера...`);
-    } else {
-      bot.sendMessage(chatId, `Дякуємо, ${user.name}, очікуйте підключення менеджера 😉`);
-    }
-
-    const userName = user ? user.name || "Без імені" : "Без імені";
-    const userUsername = msg.chat.username || "Без імені користувача";
-
-    bot.sendMessage(process.env.MANAGER_CHAT_ID, `Нова заявка ${ticketId} від ${userName} (@${userUsername}). Підтвердити та почати листування?`, {
-      reply_markup: {
-        inline_keyboard: [[{ text: "Прийняти", callback_data: `accept_${ticketId}` }]]
-      }
-    });
-    return;
-  }
-
-  if (text === "Зміна статусу замовлення" && chatId.toString() === process.env.MANAGER_CHAT_ID) {
-    const orders = await Order.find();
-
-    if (orders.length === 0) {
-      return bot.sendMessage(chatId, "Немає замовлень для зміни статусу.");
-    }
-
-    const inlineKeyboard = orders.map(order => {
-      return [{ text: `ID: ${order.orderId} @${order.username}`, callback_data: `change_status_${order.orderId}` }];
-    });
-
-    return bot.sendMessage(chatId, "Виберіть замовлення для зміни статусу:", {
-      reply_markup: {
-        inline_keyboard: inlineKeyboard
-      }
-    });
-  }
-
-  if (text === "⚡️ Швидкі відповіді") {
-    bot.sendMessage(chatId, "Виберіть питання:", {
-      reply_markup: quickRepliesKeyboard()
-    });
-    return;
-  }
-
-  if (text === "💚 Статус замовлення") {
+  if (!isManager) {
     const user = await User.findOne({ user_id: chatId });
 
-    if (!user) {
-      bot.sendMessage(chatId, "Користувача не знайдено. Зверніться до менеджера.");
-      return;
+    if (!user && text) {
+        console.log(`Ignoring message from unknown user ID: ${chatId}`);
+        return;
+    }
+    if (user && !text && !msg.photo && !msg.document && !msg.sticker && !msg.video && !msg.forward_from_chat) {
+        return;
     }
 
-    const orders = await Order.find({ username: user.username }).sort({ createdAt: -1 });
+    if (user && !user.name && user.phone_number && text) {
+      user.name = text;
+      await user.save();
 
-    if (!orders || orders.length === 0) {
-      bot.sendMessage(chatId, "Замовлень ще немає, зверніться до менеджера для його створення.");
-      return;
-    }
-
-    const latestOrder = orders[0];
-    const status = latestOrder.status || "Замовлення створено";
-    const orderId = latestOrder.orderId || "Невідомий";
-
-    let responseText = `Ваше замовлення ID: ${orderId}\nСтатус: ${status}`;
-
-    let inlineKeyboard = [];
-    switch (status) {
-      case "Замовлення прийнято та на етапі купівлі ✅":
-        inlineKeyboard = [
-          [{ text: "Коли я можу дізнатися новий статус?", callback_data: "status_question_1" }]
-        ];
-        break;
-      case "Товар викуплено та відправлено на склад в Китаї ✅":
-        inlineKeyboard = [
-          [{ text: "Коли товар прибуде на склад?", callback_data: "status_question_2" }]
-        ];
-        break;
-      case "Товар прибув на склад та готується до перевірки ✅":
-        inlineKeyboard = [
-          [{ text: "Коли я можу отримати фото-звіт?", callback_data: "status_question_3" }]
-        ];
-        break;
-      case "Посилка успішно скомплектована та готується до відправки ✅":
-        responseText += `\nВартість доставки: ${latestOrder.deliveryPrice || "Невідомо"} грн.`;
-        inlineKeyboard = [
-          [{ text: "Скільки часу у мене є на оплату доставки?", callback_data: "status_question_5" }]
-        ];
-        break;
-      case "Посилка прибула до України та готується до відправлення ✅":
-        inlineKeyboard = [
-          [{ text: "Коли я можу очікувати відправлення?", callback_data: "status_question_6" }]
-        ];
-        break;
-    }
-
-    bot.sendMessage(chatId, responseText, {
-      reply_markup: {
-        inline_keyboard: inlineKeyboard
-      }
-    });
-    return;
-  }
-
-  if (text === "🚀 Стадії замовлення") {
-    bot.sendMessage(chatId, "Виберіть стадію замовлення:", {
-      reply_markup: stagesKeyboard()
-    });
-    return;
-  }
-
-  if (text === "📤 Вийти і завершити чат") {
-    const ticket = await Ticket.findOne({ user_id: chatId, status: 'open', accepted: true });
-
-    if (ticket) {
-      ticket.status = 'closed';
-      ticket.activeManagerConversation = false;
-      await ticket.save();
-
-      bot.sendMessage(chatId, `🔒 Ваше звернення закрито.`, {
+      return bot.sendMessage(chatId, `Дякуємо, ${text}! Ваші дані збережено.`, {
         reply_markup: mainMenuKeyboard()
       });
-
-      bot.sendMessage(process.env.MANAGER_CHAT_ID, `Клієнт ${user.name} закрив заявку ${ticket.ticket_id}.`);
-    } else {
-      bot.sendMessage(chatId, "У вас немає активних заявок.");
-    }
-    return;
-  }
-
-  if (text === "Показати активні заявки" && chatId.toString() === process.env.MANAGER_CHAT_ID) {
-    const activeTickets = await Ticket.find({ status: 'open' });
-
-    if (activeTickets.length === 0) {
-      return bot.sendMessage(process.env.MANAGER_CHAT_ID, "Немає активних заявок.");
     }
 
-    const inlineKeyboard = activeTickets.map(ticket => {
-      return [{ text: `Заявка ${ticket.ticket_id}`, callback_data: `accept_${ticket.ticket_id}` }];
-    });
+    if (text === "🙇‍♂️ Зв'язок з менеджером") {
+        if (!user) return;
+      const existingTicket = await Ticket.findOne({ user_id: chatId, status: 'open' });
 
-    bot.sendMessage(process.env.MANAGER_CHAT_ID, "Активні заявки:", {
-      reply_markup: {
-        inline_keyboard: inlineKeyboard
+      if (existingTicket) {
+        return bot.sendMessage(chatId, "У вас вже є активна або не прийнята заявка. Будь ласка, дочекайтеся відповіді менеджера.");
       }
-    });
-    return;
-  }
 
-  if (text === "Історія заявок" && chatId.toString() === process.env.MANAGER_CHAT_ID) {
-    bot.sendMessage(chatId, "Виберіть тип заявок для перегляду:", {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "Всі заявки", callback_data: "view_tickets_all_1" }],
-          [{ text: "Відкриті заявки", callback_data: "view_tickets_open_1" }],
-          [{ text: "Закриті заявки", callback_data: "view_tickets_closed_1" }]
-        ]
-      }
-    });
-    return;
-  }
-
-  if (chatId.toString() === process.env.MANAGER_CHAT_ID) {
-    console.log("Менеджер надіслав повідомлення:", text);
-
-    const activeTicket = await Ticket.findOne({
-      status: 'open',
-      accepted: true,
-      activeManagerConversation: true
-    });
-
-    if (!activeTicket) {
-      return bot.sendMessage(process.env.MANAGER_CHAT_ID, "Немає активної заявки для відповіді. Виберіть заявку зі списку.", {
-        reply_markup: {
-          inline_keyboard: [[{ text: "Показати активні заявки", callback_data: "show_active_tickets" }]]
-        }
-      });
-    }
-
-    if (msg.text) {
-      activeTicket.messages.push({ from: 'manager', text: msg.text });
-      await activeTicket.save();
-      await bot.sendMessage(activeTicket.user_id, msg.text);
-    } else if (msg.photo) {
-      const fileId = msg.photo[msg.photo.length - 1].file_id;
-      const caption = msg.caption || '';
-      activeTicket.messages.push({ from: 'manager', text: 'Фото' });
-      await activeTicket.save();
-      await bot.sendPhoto(activeTicket.user_id, fileId, { caption });
-    } else if (msg.document) {
-      const fileId = msg.document.file_id;
-      activeTicket.messages.push({ from: 'manager', text: 'Документ' });
-      await activeTicket.save();
-      await bot.sendDocument(activeTicket.user_id, fileId);
-    } else if (msg.sticker) {
-      const fileId = msg.sticker.file_id;
-      activeTicket.messages.push({ from: 'manager', text: 'Стікер' });
-      await activeTicket.save();
-      await bot.sendSticker(activeTicket.user_id, fileId);
-    } else if (msg.video) {
-      const fileId = msg.video.file_id;
-      activeTicket.messages.push({ from: 'manager', text: 'Відео' });
-      await activeTicket.save();
-      await bot.sendVideo(activeTicket.user_id, fileId);
-    } else if (msg.forward_from_chat) {
-      const forwardFromChatId = msg.forward_from_chat.id;
-      const messageId = msg.forward_from_message_id;
-      activeTicket.messages.push({ from: 'manager', text: 'Переслане повідомлення' });
-      await activeTicket.save();
-      await bot.forwardMessage(activeTicket.user_id, forwardFromChatId, messageId);
-    }
-  } else {
-    console.log(`Користувач надіслав повідомлення:`, text);
-
-    const activeTicket = await Ticket.findOne({
-      user_id: chatId,
-      status: 'open',
-      accepted: true
-    });
-
-    if (activeTicket) {
-      if (msg.text) {
-        activeTicket.messages.push({ from: 'user', text: msg.text });
-        await activeTicket.save();
-        await bot.sendMessage(process.env.MANAGER_CHAT_ID, `Від ${user.name} (@${msg.chat.username}, ID заявки: ${activeTicket.ticket_id}):\n${msg.text}`);
-      } else if (msg.photo) {
-        const fileId = msg.photo[msg.photo.length - 1].file_id;
-        const caption = msg.caption || '';
-        activeTicket.messages.push({ from: 'user', text: 'Фото' });
-        await activeTicket.save();
-        await bot.sendPhoto(process.env.MANAGER_CHAT_ID, fileId, { caption: `Від ${user.name} (@${msg.chat.username}, ID заявки: ${activeTicket.ticket_id})\n${caption}` });
-      } else if (msg.document) {
-        const fileId = msg.document.file_id;
-        activeTicket.messages.push({ from: 'user', text: 'Документ' });
-        await activeTicket.save();
-        await bot.sendDocument(process.env.MANAGER_CHAT_ID, fileId, { caption: `Від ${user.name} (@${msg.chat.username}, ID заявки: ${activeTicket.ticket_id})` });
-      } else if (msg.sticker) {
-        const fileId = msg.sticker.file_id;
-        activeTicket.messages.push({ from: 'user', text: 'Стікер' });
-        await activeTicket.save();
-        await bot.sendSticker(process.env.MANAGER_CHAT_ID, fileId);
-      } else if (msg.video) {
-        const fileId = msg.video.file_id;
-        activeTicket.messages.push({ from: 'user', text: 'Відео' });
-        await activeTicket.save();
-        await bot.sendVideo(process.env.MANAGER_CHAT_ID, fileId, { caption: `Від ${user.name} (@${msg.chat.username}, ID заявки: ${activeTicket.ticket_id})` });
-      } else if (msg.forward_from_chat) {
-        const forwardFromChatId = msg.forward_from_chat.id;
-        const messageId = msg.forward_from_message_id;
-        activeTicket.messages.push({ from: 'user', text: 'Переслане повідомлення' });
-        await activeTicket.save();
-        await bot.forwardMessage(process.env.MANAGER_CHAT_ID, forwardFromChatId, messageId);
-      }
-    } else {
-      const pendingTicket = await Ticket.findOne({
+      const ticketId = await generateTicketId();
+      const ticket = new Ticket({
+        ticket_id: ticketId,
         user_id: chatId,
         status: 'open',
-        accepted: false
+        accepted: false,
+        activeManagerConversation: false,
+        messages: []
+      });
+      await ticket.save();
+      await User.findOneAndUpdate({ user_id: chatId }, { $push: { tickets: ticketId } });
+
+      const kyivDate = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Kiev' }));
+      const currentHour = kyivDate.getHours();
+      const greetingName = user.name || "Без імені";
+      if (currentHour >= 21 || currentHour < 9) {
+        bot.sendMessage(chatId, `Наші менеджери після 21:00 відпочивають🥱 Зачекайте будь ласка до 9:00.`);
+        bot.sendMessage(chatId, `✍️ Напишіть, будь ласка, питання і очікуйте підключення менеджера...`);
+      } else {
+        bot.sendMessage(chatId, `Дякуємо, ${greetingName}, очікуйте підключення менеджера 😉`);
+      }
+
+      const userNameForManager = user.name || "Без імені";
+      const userUsernameForManager = msg.chat.username || "Без імені користувача";
+
+      bot.sendMessage(process.env.MANAGER_CHAT_ID, `Нова заявка ${ticketId} від ${userNameForManager} (@${userUsernameForManager}). Підтвердити та почати листування?`, {
+        reply_markup: {
+          inline_keyboard: [[{ text: "Прийняти", callback_data: `accept_${ticketId}` }]]
+        }
+      });
+      return;
+    }
+
+    if (text === "⚡️ Швидкі відповіді") {
+      bot.sendMessage(chatId, "Виберіть питання:", {
+        reply_markup: quickRepliesKeyboard()
+      });
+      return;
+    }
+
+    if (text === "💚 Статус замовлення") {
+      if (!user) {
+        bot.sendMessage(chatId, "Користувача не знайдено. Зверніться до менеджера.");
+        return;
+      }
+      if (!user.username) {
+          bot.sendMessage(chatId, "Для перевірки статусу замовлення ваш профіль Telegram повинен мати юзернейм (@username). Будь ласка, встановіть його в налаштуваннях Telegram.");
+          return;
+      }
+
+      const orders = await Order.find({ username: user.username }).sort({ createdAt: -1 });
+
+      if (!orders || orders.length === 0) {
+        bot.sendMessage(chatId, "Замовлень для @"+ user.username + " ще немає, зверніться до менеджера для його створення.");
+        return;
+      }
+
+      const latestOrder = orders[0];
+      const status = latestOrder.status || "Замовлення створено";
+      const orderId = latestOrder.orderId || "Невідомий";
+
+      let responseText = `Ваше останнє замовлення ID: ${orderId}\nСтатус: ${status}`;
+      let inlineKeyboard = [];
+
+      switch (status) {
+        case "Замовлення прийнято та на етапі купівлі ✅":
+          inlineKeyboard = [[{ text: "Коли я можу дізнатися новий статус?", callback_data: "status_question_1" }]];
+          break;
+        case "Товар викуплено та відправлено на склад в Китаї ✅":
+          inlineKeyboard = [[{ text: "Коли товар прибуде на склад?", callback_data: "status_question_2" }]];
+          break;
+        case "Товар прибув на склад та готується до перевірки ✅":
+          inlineKeyboard = [[{ text: "Коли я можу отримати фото-звіт?", callback_data: "status_question_3" }]];
+          break;
+        case "Фотозвіт готовий.":
+             inlineKeyboard = [[{ text: "Все підходить ✅", callback_data: `confirm_photos_${latestOrder.orderId}` }]];
+             responseText += "\nОчікуємо на ваше підтвердження фотозвіту.";
+             break;
+        case "Посилка успішно скомплектована та готується до відправки ✅":
+          responseText += `\nВартість доставки: ${latestOrder.deliveryPrice != null ? latestOrder.deliveryPrice + ' грн' : "Очікуйте"} грн.`;
+          inlineKeyboard = [[{ text: "Скільки часу у мене є на оплату доставки?", callback_data: "status_question_5" }]];
+          break;
+        case "Посилка прибула до України та готується до відправлення ✅":
+          inlineKeyboard = [[{ text: "Коли я можу очікувати відправлення?", callback_data: "status_question_6" }]];
+          break;
+      }
+
+      bot.sendMessage(chatId, responseText, {
+        reply_markup: {
+          inline_keyboard: inlineKeyboard
+        }
+      });
+      return;
+    }
+
+    if (text === "🚀 Стадії замовлення") {
+      bot.sendMessage(chatId, "Виберіть стадію замовлення:", {
+        reply_markup: stagesKeyboard()
+      });
+      return;
+    }
+
+    if (text === "📤 Вийти і завершити чат") {
+        if (!user) return;
+      const ticket = await Ticket.findOne({ user_id: chatId, status: 'open', accepted: true });
+
+      if (ticket) {
+        ticket.status = 'closed';
+        ticket.activeManagerConversation = false;
+        await ticket.save();
+
+        bot.sendMessage(chatId, `🔒 Ваше звернення закрито.`, {
+          reply_markup: mainMenuKeyboard()
+        });
+
+        bot.sendMessage(process.env.MANAGER_CHAT_ID, `Клієнт ${user.name || 'Без імені'} закрив заявку ${ticket.ticket_id}.`);
+      } else {
+        bot.sendMessage(chatId, "У вас немає активних заявок для завершення.");
+      }
+      return;
+    }
+
+    if (user && (text || msg.photo || msg.document || msg.sticker || msg.video || msg.forward_from_chat)) {
+        const activeTicket = await Ticket.findOne({
+          user_id: chatId,
+          status: 'open',
+          accepted: true
+        });
+
+        const pendingTicket = await Ticket.findOne({
+          user_id: chatId,
+          status: 'open',
+          accepted: false
+        });
+
+        let targetTicket = activeTicket || pendingTicket;
+
+        if (targetTicket) {
+            let messageContent = '';
+            let messageType = '';
+
+            if (msg.text) { messageContent = msg.text; messageType = 'text'; targetTicket.messages.push({ from: 'user', text: messageContent }); }
+            else if (msg.photo) { messageContent = msg.photo[msg.photo.length - 1].file_id; messageType = 'photo'; targetTicket.messages.push({ from: 'user', text: 'Фото' }); }
+            else if (msg.document) { messageContent = msg.document.file_id; messageType = 'document'; targetTicket.messages.push({ from: 'user', text: 'Документ' }); }
+            else if (msg.sticker) { messageContent = msg.sticker.file_id; messageType = 'sticker'; targetTicket.messages.push({ from: 'user', text: 'Стікер' }); }
+            else if (msg.video) { messageContent = msg.video.file_id; messageType = 'video'; targetTicket.messages.push({ from: 'user', text: 'Відео' }); }
+            else if (msg.forward_from_chat || msg.forward_from) { messageType = 'forward'; targetTicket.messages.push({ from: 'user', text: 'Переслане повідомлення' }); }
+
+            if (messageType) {
+                await targetTicket.save();
+
+                if (pendingTicket) {
+                    bot.sendMessage(chatId, `Дякуємо, ${user.name || 'Без імені'}, ваше повідомлення додано до заявки ${pendingTicket.ticket_id}. Очікуйте підключення менеджера 😉`);
+                }
+
+                const clientName = user.name || 'Без імені';
+                const clientUsername = msg.chat.username ? `@${msg.chat.username}` : '(без юзернейму)';
+                const caption = `Від ${clientName} (${clientUsername}, ID заявки: ${targetTicket.ticket_id})\n${msg.caption || ''}`;
+
+                 try {
+                    switch (messageType) {
+                        case 'text': await bot.sendMessage(process.env.MANAGER_CHAT_ID, caption.replace('\n', ':\n') + messageContent); break;
+                        case 'photo': await bot.sendPhoto(process.env.MANAGER_CHAT_ID, messageContent, { caption }); break;
+                        case 'document': await bot.sendDocument(process.env.MANAGER_CHAT_ID, messageContent, { caption }); break;
+                        case 'sticker':
+                             await bot.sendMessage(process.env.MANAGER_CHAT_ID, caption.replace('\n', ' ') + '(Стікер)');
+                             await bot.sendSticker(process.env.MANAGER_CHAT_ID, messageContent); break;
+                        case 'video': await bot.sendVideo(process.env.MANAGER_CHAT_ID, messageContent, { caption }); break;
+                        case 'forward':
+                             await bot.sendMessage(process.env.MANAGER_CHAT_ID, caption.replace('\n', ' ') + '(Переслане повідомлення)');
+                             await bot.forwardMessage(process.env.MANAGER_CHAT_ID, msg.chat.id, msg.message_id); break;
+                    }
+                 } catch (error) {
+                     console.error(`Помилка надсилання повідомлення менеджеру від ${chatId}:`, error);
+                 }
+            }
+        } else {
+          if (!(user && !user.name && user.phone_number && text)) {
+              bot.sendMessage(chatId, "У вас немає активних або очікуючих заявок. Щоб зв'язатися з менеджером, натисніть '🙇‍♂️ Зв'язок з менеджером'.");
+          }
+        }
+         return;
+    }
+  }
+
+
+  if (isManager && !orderData[chatId] && !(photoUploadState[chatId] && photoUploadState[chatId].awaitingPrice)) {
+    if (text === "Зміна статусу замовлення") {
+      const orders = await Order.find();
+      if (orders.length === 0) { return bot.sendMessage(chatId, "Немає замовлень для зміни статусу."); }
+      const inlineKeyboard = orders.map(order => [{ text: `ID: ${order.orderId || 'N/A'} @${order.username || 'N/A'}`, callback_data: `change_status_${order.orderId}` }]);
+      return bot.sendMessage(chatId, "Виберіть замовлення для зміни статусу:", { reply_markup: { inline_keyboard: inlineKeyboard } });
+    }
+
+    if (text === "Показати активні заявки") {
+        const activeTickets = await Ticket.find({ status: 'open' });
+        if (activeTickets.length === 0) { return bot.sendMessage(process.env.MANAGER_CHAT_ID, "Немає активних заявок."); }
+        const ticketButtonsPromises = activeTickets.map(async (ticket) => {
+            const userTicket = await User.findOne({ user_id: ticket.user_id });
+            const buttonText = `Заявка ${ticket.ticket_id} (${userTicket ? (userTicket.name || userTicket.username || 'ID:' + ticket.user_id) : 'Невідомий'})`;
+            return [{ text: buttonText, callback_data: `accept_${ticket.ticket_id}` }];
+        });
+        const ticketButtons = await Promise.all(ticketButtonsPromises);
+        return bot.sendMessage(process.env.MANAGER_CHAT_ID, "Активні заявки:", { reply_markup: { inline_keyboard: ticketButtons } });
+    }
+
+
+    if (text === "Створені замовлення") {
+        await showManagerOrdersList(bot, chatId);
+        return;
+    }
+
+
+    if (text === "Історія заявок") {
+      return bot.sendMessage(chatId, "Виберіть тип заявок для перегляду:", {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Всі заявки", callback_data: "view_tickets_all_1" }],
+            [{ text: "Відкриті заявки", callback_data: "view_tickets_open_1" }],
+            [{ text: "Закриті заявки", callback_data: "view_tickets_closed_1" }]
+          ]
+        }
+      });
+    }
+
+    const managerMenuButtons = ["Оформити замовлення", "Зміна статусу замовлення", "Показати активні заявки", "Створені замовлення", "Історія заявок"];
+    if (!managerMenuButtons.includes(text) && (text || msg.photo || msg.document || msg.sticker || msg.video || msg.forward_from_chat)) {
+      console.log("Менеджер надіслав повідомлення/файл для пересилки:", text || msg.media_group_id || msg.photo?.[0].file_id || msg.document?.file_id || msg.sticker?.file_id || msg.video?.file_id);
+
+      const activeTicket = await Ticket.findOne({
+        status: 'open',
+        accepted: true,
+        activeManagerConversation: true
       });
 
-      if (pendingTicket) {
-        if (msg.text) {
-          pendingTicket.messages.push({ from: 'user', text: msg.text });
-          await pendingTicket.save();
-          bot.sendMessage(chatId, `Дякуємо, ${user.name}, очікуйте підключення менеджера 😉`);
-        } else if (msg.photo) {
-          const fileId = msg.photo[msg.photo.length - 1].file_id;
-          const caption = msg.caption || '';
-          pendingTicket.messages.push({ from: 'user', text: 'Фото' });
-          await pendingTicket.save();
-          await bot.sendPhoto(process.env.MANAGER_CHAT_ID, fileId, { caption: `Від ${user.name} (@${msg.chat.username}, ID заявки: ${pendingTicket.ticket_id})\n${caption}` });
-        } else if (msg.document) {
-          const fileId = msg.document.file_id;
-          pendingTicket.messages.push({ from: 'user', text: 'Документ' });
-          await pendingTicket.save();
-          await bot.sendDocument(process.env.MANAGER_CHAT_ID, fileId, { caption: `Від ${user.name} (@${msg.chat.username}, ID заявки: ${pendingTicket.ticket_id})` });
-        } else if (msg.sticker) {
-          const fileId = msg.sticker.file_id;
-          pendingTicket.messages.push({ from: 'user', text: 'Стікер' });
-          await pendingTicket.save();
-          await bot.sendSticker(process.env.MANAGER_CHAT_ID, fileId);
-        } else if (msg.video) {
-          const fileId = msg.video.file_id;
-          pendingTicket.messages.push({ from: 'user', text: 'Відео' });
-          await pendingTicket.save();
-          await bot.sendVideo(process.env.MANAGER_CHAT_ID, fileId, { caption: `Від ${user.name} (@${msg.chat.username}, ID заявки: ${pendingTicket.ticket_id})` });
-        } else if (msg.forward_from_chat) {
-          const forwardFromChatId = msg.forward_from_chat.id;
-          const messageId = msg.forward_from_message_id;
-          pendingTicket.messages.push({ from: 'user', text: 'Переслане повідомлення' });
-          await pendingTicket.save();
-          await bot.forwardMessage(process.env.MANAGER_CHAT_ID, forwardFromChatId, messageId);
-        }
+      if (!activeTicket) {
+        return bot.sendMessage(process.env.MANAGER_CHAT_ID, "Немає активної заявки для відповіді. Виберіть заявку зі списку.", {
+            reply_markup: {
+                inline_keyboard: [[{ text: "Показати активні заявки", callback_data: "show_active_tickets_inline" }]]
+            }
+        });
+      }
+
+      let messageType = '';
+      let messageContent = '';
+      let sent = false;
+
+      try {
+          if (msg.text) { messageType = 'text'; messageContent = msg.text; activeTicket.messages.push({ from: 'manager', text: messageContent }); await bot.sendMessage(activeTicket.user_id, messageContent); sent = true; }
+          else if (msg.photo) { messageType = 'photo'; messageContent = msg.photo[msg.photo.length - 1].file_id; activeTicket.messages.push({ from: 'manager', text: 'Фото' }); await bot.sendPhoto(activeTicket.user_id, messageContent, { caption: msg.caption || '' }); sent = true; }
+          else if (msg.document) { messageType = 'document'; messageContent = msg.document.file_id; activeTicket.messages.push({ from: 'manager', text: 'Документ' }); await bot.sendDocument(activeTicket.user_id, messageContent, { caption: msg.caption || '' }); sent = true; }
+          else if (msg.sticker) { messageType = 'sticker'; messageContent = msg.sticker.file_id; activeTicket.messages.push({ from: 'manager', text: 'Стікер' }); await bot.sendSticker(activeTicket.user_id, messageContent); sent = true; }
+          else if (msg.video) { messageType = 'video'; messageContent = msg.video.file_id; activeTicket.messages.push({ from: 'manager', text: 'Відео' }); await bot.sendVideo(activeTicket.user_id, messageContent, { caption: msg.caption || '' }); sent = true; }
+          else if (msg.forward_from_chat || msg.forward_from) { messageType = 'forward'; activeTicket.messages.push({ from: 'manager', text: 'Переслане повідомлення' }); await bot.forwardMessage(activeTicket.user_id, chatId, msg.message_id); sent = true; }
+
+          if (sent) {
+             await activeTicket.save();
+          } else {
+              console.log("Невідомий тип повідомлення від менеджера, не надіслано.");
+          }
+      } catch (error) {
+           console.error(`Помилка надсилання повідомлення клієнту ${activeTicket.user_id}:`, error);
+           bot.sendMessage(chatId, `Помилка надсилання повідомлення клієнту ID ${activeTicket.user_id}. Спробуйте ще раз або перевірте, чи бот не заблокований.`)
+               .catch(e => console.error("Помилка відправки повідомлення про помилку менеджеру:", e));
       }
     }
   }
 
-  if (text === "📤 Надіслати всі фото") {
-    if (!photoUploadState[chatId] || !photoUploadState[chatId].photos || photoUploadState[chatId].photos.length === 0) {
+  if (text === "📤 Надіслати всі фото" && isManager && photoUploadState[chatId]) {
+    if (!photoUploadState[chatId].photos || photoUploadState[chatId].photos.length === 0) {
       return bot.sendMessage(chatId, "Немає фото для надсилання.");
     }
 
     const session = photoUploadState[chatId];
     if (!session.clientId) {
-      return bot.sendMessage(chatId, "ID клієнта не знайдено. Перевірте дані та спробуйте ще раз.");
+      delete photoUploadState[chatId];
+      return bot.sendMessage(chatId, "Помилка: ID клієнта не знайдено в сесії завантаження. Спробуйте почати надсилання звіту знову.");
     }
 
     try {
-      for (const fileId of session.photos) {
-        await bot.sendPhoto(session.clientId, fileId, { caption: "Ваше замовлення готове ✅" });
+      const mediaGroup = session.photos.map((fileId) => ({ type: "photo", media: fileId }));
+
+      await bot.sendMediaGroup(session.clientId, mediaGroup);
+      console.log(`[send_all_photos] Photo report sent to Client ID: ${session.clientId} for Order ID: ${session.orderId}`);
+
+      const order = await Order.findOne({ orderId: session.orderId });
+      if (order) {
+        order.status = "Фотозвіт готовий.";
+        await order.save();
+        console.log(`[send_all_photos] Order ID: ${session.orderId} status updated to 'Фотозвіт готовий.'`);
+      } else {
+          console.warn(`[send_all_photos] Order ${session.orderId} not found to update status.`);
       }
 
+      await bot.sendMessage(session.clientId, "Фотозвіт вашого замовлення готовий!", { parse_mode: 'Markdown' });
+      await new Promise(resolve => setTimeout(resolve, 300));
       await bot.sendMessage(session.clientId, "Будь ласка, підтвердіть, що все підходить.\nЯкщо є питання - використовуйте '🙇‍♂️ Зв'язок з менеджером'.", {
         reply_markup: {
-          inline_keyboard: [
-            [{ text: "Все підходить ✅", callback_data: `confirm_photos_${session.clientId}` }]
-          ]
+          inline_keyboard: [[{ text: "Все підходить ✅", callback_data: `confirm_photos_${session.orderId}` }]]
         }
       });
 
       bot.sendMessage(chatId, "Фотозвіт успішно надіслано клієнту ✅");
-      delete photoUploadState[chatId];
+
     } catch (error) {
-      console.error("Помилка при надсиланні фото клієнту:", error);
-      bot.sendMessage(chatId, "Не вдалося надіслати фото клієнту.");
+      console.error("[send_all_photos] Error sending photo report:", error);
+      bot.sendMessage(chatId, "Не вдалося надіслати фотозвіт клієнту. Перевірте, чи бот не заблокований клієнтом, та спробуйте знову.");
+    } finally {
+       if (photoUploadState[chatId]) {
+           console.log(`[send_all_photos] Clearing photo upload state for Chat ID: ${chatId}`);
+           delete photoUploadState[chatId];
+       }
     }
     return;
   }

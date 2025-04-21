@@ -13,7 +13,7 @@ async function photosHandler(bot, msg, photoUploadState) {
       }
     });
   } else {
-    return bot.sendMessage(chatId, "Ви не перебуваєте в стані завантаження фото. Натисніть відповідну кнопку для початку.");
+    console.log(`Фото отримано від ${chatId}, але користувач не в стані photoUploadState.`);
   }
 }
 
