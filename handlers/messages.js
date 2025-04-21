@@ -291,12 +291,6 @@ async function messagesHandler(bot, msg, orderData, photoUploadState) {
       return;
     }
 
-    if (text === "🚀 Стадії замовлення") {
-      bot.sendMessage(chatId, "Виберіть стадію замовлення:", {
-        reply_markup: stagesKeyboard()
-      });
-      return;
-    }
 
     if (text === "📤 Вийти і завершити чат") {
         if (!user) return;
