@@ -16,7 +16,8 @@ function requestPhoneKeyboard() {
   function mainMenuKeyboard() {
     return {
       keyboard: [
-        ["🙇‍♂️ Зв'язок з менеджером"], ["💚 Статус замовлення"], 
+        ["👤 Персональний кабінет"],
+        ["🙇‍♂️ Зв'язок з менеджером"],
         ["⚡️ Швидкі відповіді"]
       ],
       resize_keyboard: true
@@ -70,10 +71,23 @@ function requestPhoneKeyboard() {
     };
   }
   
+  function personalCabinetKeyboard() {
+    return {
+      inline_keyboard: [
+        [{ text: "✅ Статус замовлення", callback_data: "pc_status" }],
+        [{ text: "🔄 Змінити адресу доставки", callback_data: "pc_change_address" }],
+        [{ text: "🎁 Як отримати бонуси?", callback_data: "pc_how_to_get_bonuses" }],
+        [{ text: "💰 Обміняти бонуси", callback_data: "pc_exchange_bonuses" }],
+        [{ text: "🔙 Повернутися в головне меню", callback_data: "pc_back_to_main" }]
+      ]
+    };
+  }
+  
   module.exports = {
     requestPhoneKeyboard,
     mainMenuKeyboard,
     quickRepliesKeyboard,
     stagesKeyboard,
-    backButtonKeyboard
+    backButtonKeyboard,
+    personalCabinetKeyboard
   };

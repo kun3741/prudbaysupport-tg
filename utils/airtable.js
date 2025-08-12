@@ -2,15 +2,22 @@ const Airtable = require('airtable');
 
 let base;
 
+const AIRTABLE_FIELDS = {
+    orderId: process.env.AIRTABLE_FIELD_ORDER_ID || 'Айді',
+    date: process.env.AIRTABLE_FIELD_DATE || 'Дата',
+    product: process.env.AIRTABLE_FIELD_PRODUCT || 'Товар',
+    shippingStatus: process.env.AIRTABLE_FIELD_SHIPPING_STATUS || 'Статус',
+    totalPrice: process.env.AIRTABLE_FIELD_TOTAL_PRICE || 'Сума замовлення',
+    netProfit: process.env.AIRTABLE_FIELD_NET_PROFIT || 'Чистий прибуток',
+    direction: process.env.AIRTABLE_FIELD_DIRECTION || 'Напрямок',
+};
+
 const ukrainianMonthsNominative = [
     "Січень", "Лютий", "Березень", "Квітень", "Травень", "Червень",
     "Липень", "Серпень", "Вересень", "Жовтень", "Листопад", "Грудень"
 ];
 
-/**
- * Генерує назву таблиці Airtable на основі поточного місяця та року.
- * @returns {string} Назва таблиці у форматі "Місяць Рік" (напр., "Квітень 2025").
- */
+
 function getCurrentAirtableTableName() {
     const now = new Date();
     const monthIndex = now.getMonth();
@@ -39,15 +46,13 @@ function initAirtable() {
     }
 }
 
-/**
- * Знаходить запис в Airtable за Order ID у поточній місячній таблиці.
- */
+
 async function findAirtableRecordByOrderId(orderId) {
     if (!base || !orderId) return null;
     const tableName = getCurrentAirtableTableName();
     try {
         const records = await base(tableName).select({
-            filterByFormula: `{Name} = "${orderId}"`,
+            filterByFormula: `{${AIRTABLE_FIELDS.orderId}} = "${orderId}"`,
             maxRecords: 1
         }).firstPage();
         if (records && records.length > 0) { console.log(`[Airtable][${tableName}] Знайдено запис ID ${orderId}: ${records[0].id}`); return records[0]; }
@@ -61,19 +66,20 @@ async function findAirtableRecordByOrderId(orderId) {
     }
 }
 
-/**
- * Додає нове замовлення в поточну місячну таблицю Airtable.
- */
+
 async function addOrderToAirtable(order) {
     if (!base || !order || !order.orderId) { console.error("[Airtable] Add Error: Missing data."); return; }
     const tableName = getCurrentAirtableTableName();
     const dateValue = order.createdAt ? new Date(order.createdAt) : new Date();
     const isoDateOnlyString = dateValue.toISOString().split('T')[0];
     const airtableData = {
-        'Name': order.orderId,
-        'Notes': isoDateOnlyString,
-        'Status': order.productName || 'Не вказано',
-        'Attachments': "Прямує на склад",
+        [AIRTABLE_FIELDS.orderId]: order.orderId,
+        [AIRTABLE_FIELDS.date]: isoDateOnlyString,
+        [AIRTABLE_FIELDS.product]: order.productName || 'Не вказано',
+        [AIRTABLE_FIELDS.shippingStatus]: "Прямує на склад",
+        ...(order.totalPrice != null ? { [AIRTABLE_FIELDS.totalPrice]: order.totalPrice } : {}),
+        ...(order.netProfit != null ? { [AIRTABLE_FIELDS.netProfit]: order.netProfit } : {}),
+        ...(order.direction ? { [AIRTABLE_FIELDS.direction]: (order.direction === 'За кордон' ? 'Закордон' : order.direction) } : {}),
     };
     try {
         console.log(`[Airtable][${tableName}] Спроба додати запис ID: ${order.orderId}`);
@@ -83,12 +89,11 @@ async function addOrderToAirtable(order) {
         console.error(`[Airtable][${tableName}] Помилка створення запису ID ${order.orderId}:`, error);
         if (error.statusCode === 404) { console.error(`[Airtable] Переконайтесь, що таблиця "${tableName}" існує в базі ${process.env.AIRTABLE_BASE_ID}`); }
         console.error(`[Airtable] Дані:`, airtableData);
+        console.error(`[Airtable] Налаштування полів:`, AIRTABLE_FIELDS);
     }
 }
 
-/**
- * Оновлює статус в поточній місячній таблиці Airtable, для певних значень.
- */
+
 async function updateOrderInAirtable(orderId, newBotStatus, productName) {
     if (!base || !orderId || !newBotStatus) { console.error("[Airtable] Update Error: Missing data."); return; }
     const tableName = getCurrentAirtableTableName();
@@ -105,7 +110,7 @@ async function updateOrderInAirtable(orderId, newBotStatus, productName) {
     const record = await findAirtableRecordByOrderId(orderId);
     if (!record) { console.warn(`[Airtable][${tableName}] Запис для оновлення ID: ${orderId} не знайдено.`); return; }
 
-    const fieldsToUpdate = { 'Attachments': airtableStatusToSet, };
+    const fieldsToUpdate = { [AIRTABLE_FIELDS.shippingStatus]: airtableStatusToSet };
 
     try {
         console.log(`[Airtable][${tableName}] Спроба оновити ${record.id} (ID: ${orderId}) на '${airtableStatusToSet}'`);
